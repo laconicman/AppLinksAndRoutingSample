@@ -5,13 +5,14 @@
 
 import Testing
 import Foundation
+import UIKit
 @testable import AppLinksAndRoutingSample
 
 // MARK: - DeepLinkRoute parsing
 //
-// Pure-function tests. Verifies the token-normalization path: the same enum
-// values come out regardless of whether the URL was a custom-scheme deep link
-// or an https universal link.
+// Verifies the token-normalization path (custom-scheme and universal-link URLs
+// produce the same enum values) and each adapter init delegates correctly to
+// the URL parser.
 
 @Suite("DeepLinkRoute parsing")
 struct DeepLinkRouteTests {
@@ -31,8 +32,6 @@ struct DeepLinkRouteTests {
     }
 
     // Universal-link (https) shape: route type is the first path component.
-    // These are the cases the original discussion-essentials parser silently
-    // rejected — they're the reason for token normalization.
 
     @Test func universalLinkHome() {
         #expect(DeepLinkRoute(url: URL(string: "https://example.com/home")!) == .home)
@@ -63,14 +62,50 @@ struct DeepLinkRouteTests {
     @Test func emptyHttpsPathReturnsNil() {
         #expect(DeepLinkRoute(url: URL(string: "https://example.com/")!) == nil)
     }
+
+    // NSUserActivity adapter.
+
+    @Test func userActivityBrowsingWebRoutes() {
+        let activity = NSUserActivity(activityType: NSUserActivityTypeBrowsingWeb)
+        activity.webpageURL = URL(string: "https://example.com/product/42")!
+        #expect(DeepLinkRoute(userActivity: activity) == .product(id: "42"))
+    }
+
+    @Test func userActivityNonBrowsingReturnsNil() {
+        let activity = NSUserActivity(activityType: "com.example.something-else")
+        activity.webpageURL = URL(string: "https://example.com/product/42")!
+        #expect(DeepLinkRoute(userActivity: activity) == nil)
+    }
+
+    @Test func userActivityMissingWebpageURLReturnsNil() {
+        let activity = NSUserActivity(activityType: NSUserActivityTypeBrowsingWeb)
+        #expect(DeepLinkRoute(userActivity: activity) == nil)
+    }
+
+    // UIApplicationShortcutItem adapter.
+
+    @Test @MainActor func shortcutItemRoutes() {
+        let item = UIApplicationShortcutItem(type: "applinksdemo://product/1", localizedTitle: "Continue Shopping")
+        #expect(DeepLinkRoute(shortcutItem: item) == .product(id: "1"))
+    }
+
+    @Test @MainActor func shortcutItemOrderRoutes() {
+        let item = UIApplicationShortcutItem(type: "applinksdemo://order/1001", localizedTitle: "Track Latest Order")
+        #expect(DeepLinkRoute(shortcutItem: item) == .order(id: "1001"))
+    }
+
+    @Test @MainActor func shortcutItemMalformedTypeReturnsNil() {
+        let item = UIApplicationShortcutItem(type: "not a url at all 💥", localizedTitle: "Broken")
+        #expect(DeepLinkRoute(shortcutItem: item) == nil)
+    }
 }
 
 // MARK: - AppCoordinator routing
 //
 // Uses a spy `RouteNavigating` to assert *what* the coordinator decided to
-// route to, without involving UIKit. Covers parsing→dispatch wiring, the
-// user-activity path, and the dedup behavior.
+// route to, without involving UIKit's view hierarchy.
 
+@MainActor
 @Suite("AppCoordinator routing")
 struct AppCoordinatorTests {
 
@@ -88,55 +123,60 @@ struct AppCoordinatorTests {
         return (coordinator, spy)
     }
 
-    @Test func handleDeepLinkDispatchesCustomSchemeRoute() {
+    @Test func processCustomSchemeURLDispatches() {
         let (coordinator, spy) = makeSubject()
-        coordinator.handleDeepLink(URL(string: "applinksdemo://product/123")!)
+        coordinator.process(url: URL(string: "applinksdemo://product/123")!)
         #expect(spy.navigatedRoutes == [.product(id: "123")])
     }
 
-    @Test func handleDeepLinkDispatchesUniversalLinkRoute() {
+    @Test func processUniversalLinkURLDispatches() {
         let (coordinator, spy) = makeSubject()
-        coordinator.handleDeepLink(URL(string: "https://example.com/order/abc")!)
+        coordinator.process(url: URL(string: "https://example.com/order/abc")!)
         #expect(spy.navigatedRoutes == [.order(id: "abc")])
     }
 
-    @Test func handleDeepLinkIgnoresUnparseableURL() {
+    @Test func processUnparseableURLIgnored() {
         let (coordinator, spy) = makeSubject()
-        coordinator.handleDeepLink(URL(string: "applinksdemo://unknown")!)
+        coordinator.process(url: URL(string: "applinksdemo://unknown")!)
         #expect(spy.navigatedRoutes.isEmpty)
     }
 
-    @Test func handleUserActivityRoutesBrowsingWebActivity() {
+    @Test func processUserActivityBrowsingWebDispatches() {
         let (coordinator, spy) = makeSubject()
         let activity = NSUserActivity(activityType: NSUserActivityTypeBrowsingWeb)
         activity.webpageURL = URL(string: "https://example.com/product/42")!
-        coordinator.handleUserActivity(activity)
+        coordinator.process(userActivity: activity)
         #expect(spy.navigatedRoutes == [.product(id: "42")])
     }
 
-    @Test func handleUserActivityIgnoresNonBrowsingActivity() {
+    @Test func processUserActivityNonBrowsingIgnored() {
         let (coordinator, spy) = makeSubject()
         let activity = NSUserActivity(activityType: "com.example.something-else")
         activity.webpageURL = URL(string: "https://example.com/product/42")!
-        coordinator.handleUserActivity(activity)
+        coordinator.process(userActivity: activity)
         #expect(spy.navigatedRoutes.isEmpty)
     }
 
-    @Test func handleUserActivityIgnoresMissingWebpageURL() {
+    @Test func processShortcutItemDispatches() {
         let (coordinator, spy) = makeSubject()
-        let activity = NSUserActivity(activityType: NSUserActivityTypeBrowsingWeb)
-        coordinator.handleUserActivity(activity)
+        let item = UIApplicationShortcutItem(type: "applinksdemo://order/1001", localizedTitle: "Track Latest Order")
+        coordinator.process(shortcutItem: item)
+        #expect(spy.navigatedRoutes == [.order(id: "1001")])
+    }
+
+    @Test func processShortcutItemMalformedIgnored() {
+        let (coordinator, spy) = makeSubject()
+        let item = UIApplicationShortcutItem(type: "not-a-url", localizedTitle: "Broken")
+        coordinator.process(shortcutItem: item)
         #expect(spy.navigatedRoutes.isEmpty)
     }
 
-    // Dedup: the same route delivered twice (e.g. once via willConnectTo cold
-    // start, once via openURLContexts in a quick succession) should only
-    // navigate once.
-    @Test func sameRouteDeliveredTwiceNavigatesOnce() {
+    // Quick actions are legitimately repeatable; dispatch must NOT dedup.
+    @Test func repeatedProcessingNavigatesEachTime() {
         let (coordinator, spy) = makeSubject()
-        let url = URL(string: "applinksdemo://product/123")!
-        coordinator.handleDeepLink(url)
-        coordinator.handleDeepLink(url)
-        #expect(spy.navigatedRoutes == [.product(id: "123")])
+        let item = UIApplicationShortcutItem(type: "applinksdemo://product/1", localizedTitle: "Continue Shopping")
+        coordinator.process(shortcutItem: item)
+        coordinator.process(shortcutItem: item)
+        #expect(spy.navigatedRoutes == [.product(id: "1"), .product(id: "1")])
     }
 }

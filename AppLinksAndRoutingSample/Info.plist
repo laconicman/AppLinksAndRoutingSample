@@ -13,6 +13,31 @@
 			</array>
 		</dict>
 	</array>
+	<key>UIApplicationShortcutItems</key>
+	<array>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>applinksdemo://product/1</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Continue Shopping</string>
+			<key>UIApplicationShortcutItemSubtitle</key>
+			<string>Espresso Maker</string>
+			<key>UIApplicationShortcutItemIconType</key>
+			<string>UIApplicationShortcutIconTypeBookmark</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>bag.fill</string>
+		</dict>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>applinksdemo://order/1001</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Track Latest Order</string>
+			<key>UIApplicationShortcutItemSubtitle</key>
+			<string>Order #1001</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>shippingbox.fill</string>
+		</dict>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

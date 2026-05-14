@@ -1,61 +1,118 @@
 # AppLinksAndRoutingSample
 
 A reference sample for a **scene-based UIKit app** that handles app-links
-cleanly across all the entry points iOS can deliver them through. Built
-incrementally — the first cut covers **custom-scheme deep links** and
-**universal links**, sharing one routing core. Quick actions and App Intents
-are planned next (see [`ROADMAP.md`](./ROADMAP.md)).
+cleanly across all the entry points iOS can deliver them through, with a
+tab-bar shell that looks like a real shopping app. Built incrementally — the
+current cut covers **custom-scheme deep links**, **universal links**, and
+**Home Screen quick actions**, all funneling through one routing core. App
+Intents are planned next; see [`ROADMAP.md`](./ROADMAP.md).
 
-## Scope (current)
+## What's in the app
+
+```
+┌───────────────────────────────────────────────────┐
+│                  MainTabBarController             │
+│ ┌─────────┐  ┌──────────────┐  ┌───────────────┐  │
+│ │  Home   │  │   Products   │  │    Orders     │  │
+│ │  (nav)  │  │    (nav)     │  │    (nav)      │  │
+│ └─────────┘  └──────────────┘  └───────────────┘  │
+└───────────────────────────────────────────────────┘
+```
+
+- **Home tab** — Welcome screen + an in-app cheat sheet listing the URLs and
+  quick actions that exercise every routing entry point. Doubles as live
+  documentation while running the sample.
+- **Products tab** — Two-column grid (compositional layout + diffable data
+  source) of six mock products with SF Symbol icons. Tap pushes a rich detail
+  screen.
+- **Orders tab** — Inset-grouped list of three mock orders. Status pills
+  (orange/blue/green for Processing/Shipped/Delivered), relative-date subtitle,
+  detail screen with line-items card and total.
+
+All destination screens (`ProductViewController`, `OrderViewController`) are
+reached from **both** in-app navigation (tapping a list cell) and the routing
+layer (deep link, universal link, quick action). Both paths converge.
+
+## Scope (routing entry points)
 
 | Entry point | Cold start (app not running) | Warm start (already running) |
 |---|---|---|
-| Custom-scheme deep link (`applinksdemo://…`) | `scene(_:willConnectTo:options:)` → `connectionOptions.urlContexts` | `scene(_:openURLContexts:)` |
+| Custom-scheme URL (`applinksdemo://…`) | `scene(_:willConnectTo:options:)` → `connectionOptions.urlContexts` | `scene(_:openURLContexts:)` |
 | Universal link (`https://…`) | `scene(_:willConnectTo:options:)` → `connectionOptions.userActivities` | `scene(_:continue:)` |
+| Home Screen quick action | `scene(_:willConnectTo:options:)` → `connectionOptions.shortcutItem` | `windowScene(_:performActionFor:completionHandler:)` |
 
-Both rows funnel into the same `AppCoordinator`.
+All six rows funnel into the same `AppCoordinator`.
 
 ## Architecture
 
 ```
                  ┌──────────────────────────────┐
    system  ───►  │         SceneDelegate        │     thin: parameter-passing
-  callbacks      │  (4 entry points, no logic)  │     only
+  callbacks      │  (6 entry points, no logic)  │     only
                  └───────────────┬──────────────┘
-                                 │ url / activity
+                                 │ .process(url:|userActivity:|shortcutItem:)
                                  ▼
                  ┌──────────────────────────────┐
-                 │        AppCoordinator        │     parse → dedupe → dispatch
-                 │  - DeepLinkRoute(url:)       │
-                 │  - Set<DeepLinkRoute> dedup  │
+                 │  AppCoordinator (@MainActor) │     thin: parse + dispatch
+                 │                              │
+                 │   URL ─┐                     │
+                 │   NSUA ┼─► DeepLinkRoute     │     factory family
+                 │   Item─┘   (3 overloaded     │     on the route type
+                 │             inits)           │
                  └───────────────┬──────────────┘
                                  │ navigate(to:)
                                  ▼
                  ┌──────────────────────────────┐
-                 │  RouteNavigating  (protocol) │     test seam
+                 │ RouteNavigating  (@MainActor)│     test seam
                  └───────────────┬──────────────┘
                                  │
                        ┌─────────┴──────────┐
                        ▼                    ▼
-            NavigationControllerRouter   SpyRouter
+                   TabRouter             SpyRouter
                   (production)            (tests)
+                       │
+                       ▼
+                MainTabBarController
+                  (3 nav stacks)
 ```
 
-Principle: *high-level application logic owns application flow; system-specific
-lifecycle code stays at the edge.* `SceneDelegate` is the edge. `AppCoordinator`
-is the flow. The route enum is the contract between them.
+### Principles
+
+- **`SceneDelegate` is the edge, `AppCoordinator` is the flow.** Lifecycle
+  callbacks parameter-pass into the coordinator; the coordinator owns every
+  routing decision. Survives swaps to a different shell (multi-scene, SwiftUI
+  target) without rewriting routing.
+- **Factory family on the route enum.** Instead of a separate `RouteFactory`
+  class, `DeepLinkRoute` exposes overloaded initializers: `init?(url:)`,
+  `init?(userActivity:)`, `init?(shortcutItem:)`. Each adapter delegates to
+  `init?(url:)`, so the URL parser is the single source of truth. Adding a new
+  input (App Intent, push notification) means adding one more init.
+- **No child coordinators yet.** With three flat routes and one VC per tab,
+  child coordinators would be scaffolding. The `RouteNavigating` seam already
+  lets us split into per-tab routers when actual per-tab logic appears.
+- **No async-stream pipeline.** Both producer (SceneDelegate) and consumer
+  (TabRouter) are `@MainActor`. A stream between two `@MainActor` callers adds
+  task lifecycle without payload. Modern Concurrency still shows up as
+  isolation annotations on the protocols.
+- **No SPM dependencies.** Nothing earns its keep at this scale. Reconsider
+  when there's a concrete use (e.g. multicast routing, real async chains).
 
 ### Files
 
 ```
 AppLinksAndRoutingSample/
-├── SceneDelegate.swift          Forwards 4 system callbacks to AppCoordinator
-├── AppCoordinator.swift         Owns routing + RouteNavigating + dedup
-├── DeepLinkRoute.swift          Enum + URL parsing (custom + universal in one switch)
-├── HomeViewController.swift     Destination
-├── ProductViewController.swift  Destination
-├── OrderViewController.swift    Destination
-└── Info.plist                   Registers `applinksdemo://` under CFBundleURLTypes
+├── SceneDelegate.swift          6 system callbacks → AppCoordinator
+├── AppCoordinator.swift         Owns routing; declares RouteNavigating + TabRouter
+├── DeepLinkRoute.swift          Enum + factory inits (URL, userActivity, shortcutItem)
+├── MainTabBarController.swift   Composes the three tab navs
+├── HomeViewController.swift     Welcome + in-app cheat sheet
+├── ProductsListViewController.swift   Grid of products (compositional + diffable)
+├── OrdersListViewController.swift     Inset-grouped list of orders
+├── ProductViewController.swift  Detail (used by tap and by deep link)
+├── OrderViewController.swift    Detail (used by tap and by deep link)
+├── Catalog.swift                Mock products + orders + formatting helpers
+├── SeparatorView.swift          Hairline UIView using `.separator` color
+└── Info.plist                   Custom scheme + UIApplicationShortcutItems
 ```
 
 ## URL shapes & parsing
@@ -66,10 +123,13 @@ Two URL shapes carry the routing information in different places:
 - Universal link: `https://example.com/product/123` — host = `example.com`, path = `/product/123`
 
 A naive parser that switches on `URL.host` works for the first but silently
-rejects every universal link. `DeepLinkRoute` normalizes both shapes into a
-**token list** (for `https`/`http`: path components only; for custom schemes:
-host prepended to path components), then matches with a single switch. One
-parser, two URL families.
+rejects every universal link. `DeepLinkRoute` normalizes both into a token list
+(for `https`/`http`: path components only; for custom schemes: host prepended
+to path components), then matches with a single switch.
+
+Quick actions reuse this: each `UIApplicationShortcutItem.type` is itself a
+URL string (e.g. `"applinksdemo://product/1"`), so `init?(shortcutItem:)` is
+one line of delegation to `init?(url:)`. No parallel route grammar.
 
 Routes recognized:
 
@@ -81,28 +141,38 @@ Routes recognized:
 
 ## Trying it out
 
-The app starts on a Home screen. Trigger routes from a running simulator with:
+The app launches into the **Home tab**. The Home screen lists every URL and
+quick action below. From a terminal with the simulator booted:
 
 ```sh
 xcrun simctl openurl booted applinksdemo://home
-xcrun simctl openurl booted applinksdemo://product/123
-xcrun simctl openurl booted applinksdemo://order/abc
+xcrun simctl openurl booted applinksdemo://product/2
+xcrun simctl openurl booted applinksdemo://order/1001
 ```
 
-These exercise the **custom-scheme** entry points. Kill the app between
-invocations to verify the cold-start path through `willConnectTo`.
+Kill the app between invocations to verify cold-start delivery through
+`willConnectTo`.
+
+### Home Screen quick actions
+
+Two static items are registered in `Info.plist`:
+
+- **Continue Shopping** → `applinksdemo://product/1`
+- **Track Latest Order** → `applinksdemo://order/1001`
+
+Long-press the app icon on the simulator's Home Screen to use them. (Note: on
+the simulator, long-press requires a tiny pause to register vs. on device.)
 
 ### Universal links — additional setup
 
 The `https://…` code path is wired but iOS won't deliver universal links to
-the app until you do the following (canonical reference in the header comment
-of `SceneDelegate.swift`):
+the app until:
 
 1. **Associated Domains capability** — Target → Signing & Capabilities → "+" →
    *Associated Domains*. Add an entry like `applinks:yourdomain.com`.
 2. **Host an `apple-app-site-association` file** at
    `https://yourdomain.com/.well-known/apple-app-site-association`, served as
-   `application/json`, no redirects, valid TLS. Body:
+   `application/json`, no redirects, valid TLS:
    ```json
    {
      "applinks": {
@@ -113,37 +183,33 @@ of `SceneDelegate.swift`):
      }
    }
    ```
-3. **Reinstall the app** — iOS fetches AASA on first install / subsequent updates.
+3. **Reinstall the app** — iOS fetches AASA on install and updates.
 4. **Test** by tapping a matching `https://` URL in Mail/Notes/Safari, or
    `xcrun simctl openurl booted https://yourdomain.com/product/123` (only
-   triggers the universal-link path if AASA is installed correctly).
+   triggers the universal-link path if AASA is correctly installed).
 
-## Deduplication
+Canonical setup notes also live in the header comment of `SceneDelegate.swift`.
 
-`AppCoordinator` keeps a `Set<DeepLinkRoute>` of routes already handled and
-silently drops repeats. This is intentional — iOS can deliver the same route
-twice in quick succession (cold start through `connectionOptions` followed
-immediately by a warm-start callback for the same URL) and we don't want to
-push the destination twice.
+## Navigation behavior
 
-It's reasonable **while a route value fully identifies the destination**. It
-will not survive contact with quick actions or Intents (legitimate
-fire-the-same-thing-repeatedly semantics). When that step lands we'll swap
-the set for one of: short-lived "cold-start handled" flag, per-event token,
-or idempotency-at-the-navigation-layer. See `ROADMAP.md` for the open
-discussion.
+`TabRouter` switches to the route's tab and **pops to root before pushing the
+detail**. This makes the resulting navigation stack a function of the route
+alone — repeated deliveries of the same route land you in the same place, not
+on a stack of duplicates. Replaces the earlier lifetime-of-scene
+`Set<DeepLinkRoute>` dedup, which broke legitimately-repeatable quick actions.
 
 ## Testing
 
 Swift Testing (per project convention; see `CLAUDE.md`). Two suites:
 
-- **`DeepLinkRouteTests`** — pure parsing. Verifies custom-scheme and
-  universal-link URLs produce the same enum values (proves token
-  normalization), and that malformed URLs return `nil`.
+- **`DeepLinkRouteTests`** — pure parsing across all three input shapes (URL,
+  NSUserActivity, UIApplicationShortcutItem). Asserts custom-scheme and
+  universal-link URLs produce identical enum values (token normalization);
+  rejects malformed inputs.
 - **`AppCoordinatorTests`** — uses a `SpyRouter` (a `RouteNavigating`
   conformance that records calls) to assert routing decisions without
-  involving UIKit. Covers parsing→dispatch wiring, `NSUserActivity` filtering,
-  and the dedup behavior.
+  involving UIKit's view hierarchy. Covers all three `process(...)` overloads
+  and verifies repeated dispatches *do* navigate each time (no dedup).
 
 Run:
 
@@ -155,8 +221,10 @@ Or in Xcode: ⌘U.
 
 ## Sources & references
 
-- **[How to Implement Deep Link and ShortcutItems When Using SceneDelegate](https://www.jakehao.com/scene-delegate-open-url)** — origin of the two-entry-point pattern (cold start via `connectionOptions`, warm start via the dedicated callbacks). The architecture here largely mirrors this article.
-- **[Apple — Add Home Screen quick actions](https://developer.apple.com/documentation/uikit/add-home-screen-quick-actions)** — the canonical Apple sample for scene-based quick actions. Used as the template for the *next* step in the roadmap.
-- **[MarcoPolo — `ExampleTests.swift`](https://github.com/HelioMesquita/MarcoPolo/blob/main/ExampleTests/ExampleTests.swift)** — protocol-mock testing pattern. We apply the same idea at the `RouteNavigating` seam instead of `UIApplication`.
+- **[How to Implement Deep Link and ShortcutItems When Using SceneDelegate](https://www.jakehao.com/scene-delegate-open-url)** — origin of the two-entry-point pattern (cold start via `connectionOptions`, warm start via dedicated callbacks).
+- **[Apple — Add Home Screen quick actions](https://developer.apple.com/documentation/uikit/add-home-screen-quick-actions)** — Apple sample for scene-based quick actions; pattern for `connectionOptions.shortcutItem` + `windowScene(_:performActionFor:)`.
+- **[MarcoPolo — `ExampleTests.swift`](https://github.com/HelioMesquita/MarcoPolo/blob/main/ExampleTests/ExampleTests.swift)** — protocol-mock testing pattern. Applied here at the `RouteNavigating` seam.
+- **[Deep linking iOS — moderateepheezy gist](https://gist.github.com/moderateepheezy/af9b41460629dcb69f5ececa1fa58912)** — factory pattern for routing multiple input shapes into one canonical action. Adopted as overloaded inits on the route enum.
+- **[Handle Deep Links with Async Algorithms — Jacob Bartlett](https://blog.jacobstechtavern.com/p/deep-links-with-async-algorithms)** — considered AsyncChannel-per-route pipeline; rejected because single-consumer on both sides removed the architectural pressure that earned the design.
 
-See `ROADMAP.md` for in-progress questions, decisions log, and what's planned next.
+See `ROADMAP.md` for in-progress questions, full decisions log, and what's planned next.
