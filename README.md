@@ -1,5 +1,7 @@
 # AppLinksAndRoutingSample
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/laconicman/AppLinksAndRoutingSample)
+
 A reference sample for a **scene-based UIKit app** that handles app-links
 cleanly across all the entry points iOS can deliver them through, with a
 tab-bar shell that looks like a real shopping app. Built incrementally — the
